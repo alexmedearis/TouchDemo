@@ -1,110 +1,101 @@
 # Touch Demo
 
-A minimal letter-tracing app that reproduces a multi-touch bug observed in
-**LetterSchool** on iPad, and demonstrates a fix. Two touch-handling
-implementations sit behind a toggle, driving the exact same drawing surface, so
-the two behaviours can be compared directly on a device.
+A small letter tracing app that reproduces a multi-touch bug I ran into in
+LetterSchool on iPad, plus a version that handles it correctly. Both sit behind
+a toggle so you can compare them on device.
 
 ## The bug
 
-Tracing stops working when an unrelated finger is already touching the screen,
-and whether it works depends on the order the fingers land.
+If a finger is already resting on the screen, tracing with a second finger does
+nothing. Do it in the other order and it works.
 
 | Order | Result |
 | --- | --- |
-| Rest a finger, **then** trace with another | Trace does nothing |
-| Trace first, **then** rest a second finger | Trace continues working |
+| Rest a finger, then trace with another | Nothing happens |
+| Trace first, then rest a second finger | Trace keeps working |
 
-The resting finger is irrelevant to the task — it isn't on the letter and isn't
-meant to draw anything. It only has to be touching the screen first.
+The resting finger isn't on the letter and isn't trying to draw anything. It
+only has to get there first.
 
 ### Reproducing in LetterSchool
 
-1. Open any letter-tracing exercise.
-2. Rest one finger anywhere on the screen and keep it still.
-3. With a second finger, trace the letter as normal.
-4. The trace does not register.
-5. Lift both fingers. Trace the letter first, then rest a second finger down.
-   Tracing now works, and keeps working.
+1. Open any letter tracing exercise
+2. Rest a finger anywhere on the screen and hold it still
+3. Trace the letter with a second finger
+4. Nothing registers
+5. Lift both. Trace first, then rest a second finger. Now it works, and keeps
+   working.
 
-Observed on: _iPad model / iPadOS version / LetterSchool version — fill in._
+Seen on: _iPad model, iPadOS version, app version._
 
-### Why it matters
+Worth flagging because kids hold the iPad steady with one hand while writing
+with the other. Testing with a single finger or a stylus never hits it.
 
-This is a handwriting app for young children. A child resting a palm or spare
-fingers on the screen while tracing is the most common real-world input it will
-receive. It is also precisely the input that testing with a single careful
-finger or a stylus never produces.
+## What the demo does
 
-## What this demo shows
+Trace the A. The part you've covered fills in at full width, so one pass down
+the middle finishes that stretch. It marks progress rather than painting.
 
-Trace the letter A with a finger. The portion you have covered fills in at full
-width — the fill marks progress along the letter rather than painting it, so a
-single pass down the middle completes that stretch.
+Every finger on screen gets a ring: green if the app is tracking it, grey if
+it isn't. In the broken case you can watch the idle finger sit there holding
+the green ring while the finger doing the work gets grey.
 
-Rings follow each finger on screen: **green** for a touch the app is tracking,
-**grey** for one it is ignoring. This is what makes the bug visible rather than
-merely describable — in the failing case you can watch the resting finger hold a
-green ring while the finger doing the actual work wears a grey one.
+The toggle switches between:
 
-The segmented control switches implementations:
-
-- **Buggy** — reproduces the behaviour above.
-- **Fixed** — rest any number of fingers anywhere, then trace; it works every
-  time. Multiple traces can also run at once.
+- **Buggy**, which reproduces the behaviour above
+- **Fixed**, which works regardless of how many fingers are down or what order
+  they landed in
 
 ## Running it
 
-Open `Touch Demo.xcodeproj` in Xcode and run on a device. **A real device is
-required** — the Simulator cannot produce the two-finger input the demo is about.
-
-## Likely causes
-
-The app was examined only from the outside, so the following are ranked
-hypotheses rather than findings. All three produce the observed order-dependence.
-
-1. **Index-based touch tracking in a cross-platform engine layer** — e.g. Unity's
-   `Input.GetTouch(0)` or `Input.mousePosition`, which maps to touch 0. A resting
-   finger *is* touch 0, so the tracing finger at index 1 is never read.
-2. **`isMultipleTouchEnabled` left at its default of `false`** on the drawing
-   view, if the app is native UIKit. UIKit then delivers only one touch and the
-   second finger is never seen at all.
-3. **A single-touch state machine** — one `activeTouch` slot claimed by whichever
-   touch arrives first and never reconsidered. This is what the demo's buggy mode
-   implements; see the `BUG 0`–`BUG 4` comments in `TraceCanvasView.swift`.
-
-A SwiftUI `DragGesture` produces the same signature and belongs in the same
-family, since it models a single drag bound to the first finger down.
-
-### Telling them apart without source access
-
-- **Lift the resting finger mid-trace, keeping the tracing finger down.** If the
-  trace springs to life mid-stroke, tracking is index-based — the tracing finger
-  has just become index 0. Nothing else recovers without lifting both fingers.
-- **Rest the finger outside the tracing canvas**, on chrome or a margin. If it
-  still breaks, input is screen-global, pointing at an engine-level cause rather
-  than a per-view one.
-- **Tap and release elsewhere, then trace.** This should work, confirming the
-  problem is concurrent touches rather than leftover state.
+Open `Touch Demo.xcodeproj` and run on a real device. The Simulator can't
+produce the input this is about.
 
 ## The fix
 
-Two rules, of which the second is the one usually missed:
+Two parts.
 
-1. **Key state by touch identity, not arrival order.** A map keyed by the touch
-   itself (`ObjectIdentifier(UITouch)` in UIKit, `fingerId` rather than index in
-   Unity) instead of a single "current touch" field. Note that Unity touch
-   *indices* shift when a touch ends, while `fingerId` is stable.
-2. **Decide relevance from where a touch began.** A touch matters only if it
-   starts on the letter. Irrelevant touches claim nothing, so no number of them
-   can block a trace. Without this rule the capacity has merely gone from one
-   finger to N, and the same class of bug returns with N+1.
+**Turn multi-touch on.** `isMultipleTouchEnabled` is `false` by default on
+`UIView`. With it off, UIKit gives the view one touch and drops the rest, so the
+second finger never arrives. Nothing looks wrong in the code because there's
+nothing there to find.
 
-Both are implemented in the `Fixed path` section of `TraceCanvasView.swift`,
-where each fix is commented against the specific defect it addresses.
+**Track touches by identity, and choose them by where they started.** Key state
+on the `UITouch` object itself rather than a single "current touch" field. A
+touch only starts a stroke if it begins on the letter; anything else is ignored
+and takes up no state at all. That second half is what makes it survive a palm
+or a steadying hand instead of just working for two fingers.
 
-## Layout
+Both are in the `Fixed path` section of `TraceCanvasView.swift`.
 
-- `Touch Demo/TraceCanvasView.swift` — the canvas, both touch implementations,
-  and the letter-progress model. Grep for `BUG` to find the annotated defects.
-- `Touch Demo/ContentView.swift` — mode toggle, legend, and Clear button.
+## Guesses at the cause
+
+From the outside, so these are guesses:
+
+- Touches tracked by index rather than identity. `Input.GetTouch(0)`,
+  `touches[0]`, that sort of thing. The resting finger is index 0, so the
+  tracing finger never gets read.
+- `isMultipleTouchEnabled` left at its default.
+- A single `activeTouch` field, claimed by whichever touch arrives first. That's
+  what the buggy mode here does. Grep for `BUG` in `TraceCanvasView.swift`.
+
+A SwiftUI `DragGesture` gives the same result, since it only models one drag.
+
+### Narrowing it down without the source
+
+Hold a finger down, start tracing with a second so that it fails, then lift the
+resting finger while the tracing one stays down and keeps moving.
+
+If the stroke comes to life mid-trace, touches are being tracked by index and
+the tracing finger has just become index 0. If it stays dead until you lift and
+press again, something rejected that touch earlier and is still holding state.
+
+Also worth trying: rest the finger outside the tracing area, on a margin or
+some chrome. If it still breaks, input is being read globally rather than per
+view.
+
+## Files
+
+- `Touch Demo/TraceCanvasView.swift`, the canvas, both touch implementations and
+  the letter progress model
+- `Touch Demo/ContentView.swift`, the toggle, legend and clear button
