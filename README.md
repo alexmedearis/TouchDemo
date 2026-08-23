@@ -26,8 +26,6 @@ only has to get there first.
 5. Lift both. Trace first, then rest a second finger. Now it works, and keeps
    working.
 
-Seen on: _iPad model, iPadOS version, app version._
-
 Worth flagging because kids hold the iPad steady with one hand while writing
 with the other. Testing with a single finger or a stylus never hits it.
 
