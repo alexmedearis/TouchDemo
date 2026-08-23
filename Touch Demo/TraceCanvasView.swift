@@ -139,13 +139,19 @@ final class TraceCanvasView: UIView {
 
     // MARK: - Touch state (buggy path)
 
-    /// The one and only touch this implementation is willing to follow.
+    // BUG 0: the root cause, and it is this declaration rather than any of the
+    // code below. One slot, one touch. The moment a view stores "the" touch
+    // instead of "the touches that matter", the order the fingers land in
+    // starts deciding whether drawing works at all.
     private var activeTouchID: ObjectIdentifier?
     private var activeTrace = Trace()
 
     // MARK: - Touch state (fixed path)
 
-    /// Every touch that started a trace, each with its own progress along the letter.
+    /// Every touch that started a trace, each with its own progress along the
+    /// letter. The counterpart to BUG 0: capacity is not one, it is however
+    /// many touches happen to be relevant, and identity comes from the touch
+    /// rather than from arrival order.
     private var traceByTouch: [ObjectIdentifier: Trace] = [:]
 
     // MARK: - Debug overlay
@@ -166,7 +172,11 @@ final class TraceCanvasView: UIView {
 
     private func commonInit() {
         // Off by default on UIView — without this, UIKit only ever delivers the
-        // first touch and *neither* implementation below can see a second finger.
+        // first touch and *neither* implementation below can see a second
+        // finger. Worth knowing that this one missing line reproduces the whole
+        // bug on its own, with no faulty-looking code anywhere to find. It is
+        // set explicitly here so the two modes differ only in how they track
+        // touches, never in which touches they are handed.
         isMultipleTouchEnabled = true
         backgroundColor = .systemBackground
         isOpaque = true
@@ -362,19 +372,61 @@ final class TraceCanvasView: UIView {
 
     // MARK: Buggy path
     //
-    // A single `activeTouchID` slot, claimed by whichever touch happens to
-    // arrive first and never re-evaluated. A finger resting anywhere on the
-    // canvas takes the slot, so the finger that actually traces the letter is
-    // filtered out in touchesMoved and never fills anything in. Touch down in
-    // the other order and the tracing finger wins the slot, which is why the
-    // bug looks like it depends on the order the fingers land.
+    // A single `activeTouchID` slot, claimed by whichever touch arrives first
+    // and never reconsidered. Grep this section for "BUG" to see the four
+    // places that combine into the failure.
+    //
+    // Rest a finger, then trace — BROKEN:
+    //   1. touchesBegan(resting)  -> slot is free, resting finger takes it.
+    //                                It is nowhere near the letter, so it
+    //                                fills nothing in. It just sits there
+    //                                holding the slot.
+    //   2. touchesBegan(tracing)  -> slot is taken. Dropped at BUG 1.
+    //   3. touchesMoved(tracing)  -> not the slot holder. Dropped at BUG 3.
+    //
+    // Trace, then rest a finger — WORKS:
+    //   1. touchesBegan(tracing)  -> slot is free, tracing finger takes it.
+    //   2. touchesBegan(resting)  -> slot is taken. Dropped at BUG 1, which
+    //                                this time is harmless: the finger being
+    //                                turned away is the irrelevant one.
+    //   3. touchesMoved(tracing)  -> it *is* the slot holder, so it draws.
+    //
+    // Same code, same two fingers, opposite outcome. Whenever a touch bug
+    // reads as order-dependent, look for state shaped like this.
+    //
+    // Two other causes produce this identical signature in a real app:
+    //
+    //   * `isMultipleTouchEnabled` left at its default of false, so UIKit
+    //     never delivers the second touch at all (see commonInit above).
+    //   * A SwiftUI `DragGesture`, which models one drag and binds it to the
+    //     first finger down.
+    //
+    // To tell them apart, log at the very top of touchesBegan, above every
+    // guard. If the second finger produces no log, delivery is the problem;
+    // if it logs and still nothing draws, the state machine is.
 
     private func buggyTouchesBegan(_ touches: Set<UITouch>) {
         for touch in touches {
             touchMarkers[ObjectIdentifier(touch)] = (touch.location(in: self), false)
         }
 
+        // BUG 1: first come, first served — and never revisited. The resting
+        // finger got here first, so the finger about to trace the letter is
+        // turned away before anything has even looked at where it landed.
+        // Relevance should be decided by *where* a touch begins, not by *when*.
+        //
+        // This guard is rarely written as bluntly as it is here. The usual
+        // spellings look like ordinary defensiveness:
+        //
+        //     guard !isDrawing else { return }
+        //     guard currentStroke == nil else { return }
+        //     if startPoint != nil { return }
         guard activeTouchID == nil else { return }
+
+        // BUG 2: `touches` is a Set, so `first` is whichever element it happens
+        // to yield. When two fingers land inside the same event, which one gets
+        // the slot is a coin flip — which is why bugs of this shape often look
+        // intermittent before somebody works out the ordering rule.
         guard let touch = touches.first else { return }
 
         let id = ObjectIdentifier(touch)
@@ -391,6 +443,11 @@ final class TraceCanvasView: UIView {
             touchMarkers[id] = (touch.location(in: self), id == activeTouchID)
         }
 
+        // BUG 3: the far side of the trap. UIKit *does* deliver the tracing
+        // finger's movement — it arrives in this very method, on time, with
+        // correct coordinates — and this filter throws it on the floor because
+        // some unrelated finger holds the slot. Nothing is broken at the OS
+        // level. Every dropped touch here is self-inflicted.
         guard let activeTouchID else { return }
         guard let touch = touches.first(where: { ObjectIdentifier($0) == activeTouchID }) else { return }
         for sample in event?.coalescedTouches(for: touch) ?? [touch] {
@@ -399,6 +456,11 @@ final class TraceCanvasView: UIView {
     }
 
     private func buggyTouchesEnded(_ touches: Set<UITouch>) {
+        // BUG 4: freeing the slot comes too late to help. Lift the resting
+        // finger mid-trace and the slot opens, but the tracing finger already
+        // had its touchesBegan — and it will never get another one. It stays
+        // ignored until it is lifted and put back down, which is why the bug
+        // feels unrecoverable rather than merely delayed.
         guard let activeTouchID else { return }
         if touches.contains(where: { ObjectIdentifier($0) == activeTouchID }) {
             self.activeTouchID = nil
@@ -419,6 +481,10 @@ final class TraceCanvasView: UIView {
             let id = ObjectIdentifier(touch)
             let location = touch.location(in: self)
 
+            // FIX for BUG 1 and BUG 2: the whole set is walked, and each touch
+            // is judged on where it landed rather than on when it arrived. A
+            // finger that misses the letter simply fails this check and claims
+            // nothing, so no number of resting fingers can block a trace.
             guard locate(location, preferring: nil) != nil else {
                 touchMarkers[id] = (location, false)
                 continue
@@ -436,6 +502,10 @@ final class TraceCanvasView: UIView {
             let id = ObjectIdentifier(touch)
             touchMarkers[id] = (touch.location(in: self), traceByTouch[id] != nil)
 
+            // FIX for BUG 3 and BUG 4: keyed by the touch's own identity, so
+            // there is no shared slot to contend for. Traces advance
+            // independently, and a touch that never registered is skipped
+            // without disturbing the ones that did.
             guard var trace = traceByTouch[id] else { continue }
             for sample in event?.coalescedTouches(for: touch) ?? [touch] {
                 advance(&trace, to: sample.location(in: self))
